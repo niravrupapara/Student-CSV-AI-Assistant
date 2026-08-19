@@ -1,8 +1,5 @@
 import json
 import streamlit as st
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field, field_validator
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from src.state import AgentState
 from src.prompts import PLANNER_SYSTEM_PROMPT
@@ -10,56 +7,71 @@ from src.data_loader import extract_schema_info
 from src.llm_client import get_llm_client
 from src.logger import logger
 
-class QueryPlan(BaseModel):
-    operation: str = Field(default="filter")
-    filters: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
-    columns: Optional[List[str]] = Field(default_factory=list)
-    sort_by: Optional[str] = Field(default=None)
-    ascending: bool = Field(default=True)
-    limit: Optional[int] = Field(default=None)
-    last_only: bool = Field(default=False)
-    target_column: Optional[str] = Field(default=None)
-    explanation: Optional[str] = Field(default=None)
 
-    @field_validator("columns", "filters", mode="before")
-    def handle_null_lists(cls, v):
-        return v if v is not None else []
+def planner_node(state: AgentState):
 
-def planner_node(state: AgentState) -> Dict[str, Any]:
-    user_question = state.get("user_question", "")
+    question = state.get("user_question", "")
+    current_datetime = state.get("current_datetime_str", "")
     df = st.session_state.get("dataframe")
-    schema_info = extract_schema_info(df) if df is not None else {}
-    current_dt = state.get("current_datetime_str", "")
 
-    logger.info(f"question: {user_question}")
+    if df is None:
+        return {
+            "query_plan": {},
+            "error": "CSV data is not loaded."
+        }
 
-    system_prompt = PLANNER_SYSTEM_PROMPT.format(
-        current_datetime_str=current_dt,
-        total_rows=schema_info.get("total_rows", 0),
-        columns=schema_info.get("columns", []),
-        column_types=schema_info.get("column_types", {}),
-        distinct_values=json.dumps(schema_info.get("distinct_values", {}), indent=2),
-        sample_rows=json.dumps(schema_info.get("sample_rows", []), indent=2)
-    )
+    try:
+        # Get CSV schema information
+        schema = extract_schema_info(df)
 
-    messages = [SystemMessage(content=system_prompt)]
+        # Build planner prompt
+        prompt = PLANNER_SYSTEM_PROMPT.format(
+            columns=schema.get("columns", []),
+            column_types=schema.get("column_types", {}),
+            sample_rows=schema.get("sample_rows", []),
+            current_datetime_str=current_datetime,
+            user_question=question,
+        )
 
-    for msg in state.get("messages", [])[-4:]:
-        if isinstance(msg, (HumanMessage, AIMessage)):
-            messages.append(msg)
+        # Ask LLM to create query plan
+        llm = get_llm_client()
+        response = llm.invoke(prompt)
 
-    messages.append(HumanMessage(content=user_question))
+        content = response.content.strip()
 
-    llm = get_llm_client()
-    response = llm.invoke(messages)
-    content = response.content.strip()
+        # Remove Markdown code fences if the model adds them
+        if content.startswith("```"):
+            content = content.replace("```json", "").replace("```", "").strip()
 
-    if content.startswith("```json"): content = content[7:]
-    if content.startswith("```"): content = content[3:]
-    if content.endswith("```"): content = content[:-3]
+        plan = json.loads(content)
 
-    raw_json = json.loads(content.strip())
-    plan_dict = QueryPlan(**raw_json).model_dump()
+        # Keep only real CSV columns
+        valid_columns = set(df.columns)
 
-    logger.info(f"query_plan: {json.dumps(plan_dict)}")
-    return {"query_plan": plan_dict, "error": None}
+        plan["filters"] = {
+            column: value
+            for column, value in plan.get("filters", {}).items()
+            if column in valid_columns
+        }
+
+        plan["columns"] = [
+            column
+            for column in plan.get("columns", [])
+            if column in valid_columns
+        ]
+
+        logger.info(f"Question: {question}")
+        logger.info(f"Query plan: {plan}")
+
+        return {
+            "query_plan": plan,
+            "error": None
+        }
+
+    except Exception as e:
+        logger.error(f"Planner error: {e}")
+
+        return {
+            "query_plan": {},
+            "error": f"Failed to create query plan: {str(e)}"
+        }

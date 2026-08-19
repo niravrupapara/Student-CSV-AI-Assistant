@@ -1,54 +1,57 @@
 # 🎓 Student CSV AI Assistant
 
-A simple, clean, and modular **Student CSV AI Agent** built with **Python**, **Streamlit**, **LangGraph**, **LangChain**, and **Mistral AI**.
+A clean, modular, and optimized **Student CSV AI Agent** built with **Python**, **Streamlit**, **LangGraph**, **LangChain**, and **Mistral AI**.
 
-This application allows students and administrators to upload a CSV containing student schedules/attendance data and ask natural-language questions about lectures, teachers, classrooms, timings, and schedules.
+This application allows students and administrators to upload a CSV file containing academic schedules or student records and ask natural-language questions about lectures, teachers, classrooms, timings, and attendance.
 
 ---
 
-## 🏗️ LangGraph Architecture
+## 🏗️ LangGraph Architecture & Workflow
 
-The system uses a stateful **LangGraph** workflow that guarantees safe, validated query generation without executing arbitrary Python or Pandas code.
+The core agent workflow is orchestrated using **LangGraph** to ensure predictable, structured query generation without executing arbitrary Python/Pandas scripts.
 
 ```text
-User Question
-      ↓
-Query Planner (Mistral)
-      ↓
-Pandas Query Executor
-      ↓
-Validator Node
-      ↓
- ┌────┴────┐
- │         │
-Valid    Invalid
- │         │
- ↓         ↓
-Answer   Retry/Planner Loop (up to 3 retries)
-Generator
- │
- ↓
-END
+       ┌────────────────────────┐
+       │     User Question      │
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │      Query Planner     │  (Mistral LLM extracts filters & target columns as JSON)
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │     Query Executor     │  (Pandas safely executes filters on the uploaded CSV DataFrame)
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │    Answer Generator    │  (Mistral LLM synthesizes execution records into natural text)
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │     Final Answer       │
+       └────────────────────────┘
 ```
 
-### LangGraph Nodes Breakdown:
+### 🧩 Node Breakdown:
 
 1. **`Query Planner` (`src/query_planner.py`)**:
-   - Evaluates the user's natural language question alongside conversation history and system datetime.
-   - Uses Pydantic (`QueryPlan`) for strict schema validation.
-   - Produces a structured JSON query plan (`filter`, `list`, `count`, `unique`).
-   - **No arbitrary Python code generation!**
+   - Inspects the user's natural language question, current date/time, and the CSV schema metadata (column names, types, sample values).
+   - Calls **Mistral AI** (`ChatMistralAI`) to produce a structured JSON query plan containing `filters` and target `columns`.
+   - Validates that only existing columns from the DataFrame are included in the query plan.
 
-2. **`Pandas Query Executor` (`src/query_executor.py`)**:
-   - Executes the structured JSON query plan safely using pre-defined Pandas filtering methods.
-   - Supports case-insensitive string matching, numeric range comparison, date/time filtering, sorting, limits, counts, and unique value extractions.
+2. **`Query Executor` (`src/query_executor.py`)**:
+   - Takes the structured JSON query plan and applies filtering logic directly against the loaded Pandas `DataFrame`.
+   - Performs case-insensitive matching for string columns and exact matching for values.
+   - Formats the resulting records and summary string for downstream consumption.
 
-3. **`Validator Node` (`src/validator.py`)**:
-   - Validates that the query plan exists and executed without exceptions.
-   - If execution fails due to invalid parameters or schema mismatches, routes state back to the `Query Planner` for a retry attempt (up to 3 retries).
-
-4. **`Answer Generator` (`src/answer_generator.py`)**:
-   - Takes the original question, query plan, and executed data summary to compose a friendly, accurate, natural language response.
+3. **`Answer Generator` (`src/answer_generator.py`)**:
+   - Takes the original question and the filtered query result.
+   - Prompts Mistral to formulate a concise, natural-language response for the user.
+   - Handles empty/zero-match cases gracefully without treating them as system failures.
 
 ---
 
@@ -57,28 +60,27 @@ END
 ```text
 Student-CSV-AI-Assistant/
 │
-├── app.py                      # Main Streamlit web application UI
+├── app.py                      # Streamlit UI & chat interface
 ├── data/
-│   └── student_schedule_synthetic_1250.csv  # Included sample dataset
+│   └── student_schedule_synthetic_1250.csv  # Sample student schedule dataset
+│
 ├── src/
-│   ├── __init__.py             # Module initialization
-│   ├── llm_client.py           # Dedicated Mistral AI LLM client factory
-│   ├── state.py                # LangGraph state schema definition
-│   ├── graph.py                # Parameterless LangGraph workflow compilation
-│   ├── query_planner.py        # Query Planner node (JSON plan & Pydantic schema)
-│   ├── query_executor.py       # Safe Pandas query executor node
-│   ├── validator.py            # Validation node & conditional routing edge
-│   ├── answer_generator.py     # Answer Generator node
-│   ├── prompts.py              # System prompts & date/time resolution instructions
+│   ├── __init__.py             # Package initializer
+│   ├── state.py                # LangGraph AgentState TypedDict schema
+│   ├── graph.py                # LangGraph StateGraph workflow & runner helper
+│   ├── query_planner.py        # Planner node (generates JSON query plan)
+│   ├── query_executor.py       # Safe Pandas query execution node
+│   ├── answer_generator.py     # Answer synthesis node
+│   ├── prompts.py              # System prompts for planner & answer generator
 │   ├── data_loader.py          # CSV loader & cached schema extractor
-│   └── logger.py               # Centralized logging module
+│   ├── llm_client.py           # Dedicated Mistral AI client factory
+│   └── logger.py               # Centralized logging module (logs to app.log)
 │
 ├── logs/
-│   └── app.log                 # Rotating file logs (created automatically)
-├── .env                        # Local environment variables
-├── .env.example                # Example environment setup
-├── .gitignore                  # Git ignore configuration
-├── requirements.txt            # Project Python dependencies
+│   └── app.log                 # Application log file
+├── .env                        # Local environment variables (MISTRAL_API_KEY)
+├── .gitignore                  # Git ignore rules
+├── requirements.txt            # Python package dependencies
 └── README.md                   # Documentation
 ```
 
@@ -87,40 +89,51 @@ Student-CSV-AI-Assistant/
 ## 🚀 Quick Start Guide
 
 ### 1. Prerequisites
-Ensure you have **Python 3.10+** installed.
+- **Python 3.10+** installed.
+- A **Mistral AI API Key** from [console.mistral.ai](https://console.mistral.ai).
 
 ### 2. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Environment Setup
-Copy `.env.example` to `.env` and add your **Mistral API Key**:
+### 3. Configure API Key
+Create a `.env` file in the root directory:
 ```env
 MISTRAL_API_KEY=your_mistral_api_key_here
 ```
 
-### 4. Run the Application
-Launch the Streamlit app:
+### 4. Run the Streamlit Application
 ```bash
 streamlit run app.py
 ```
 
 ---
 
-## 💡 Example Questions
+## 🧪 Verified Test Questions & Evaluations
 
-- `"What lecture do I have tomorrow at 5 PM?"`
-- `"Who teaches Machine Learning?"`
-- `"Where is my Natural Language Processing lecture?"`
-- `"How many lectures do I have on Thursday?"`
-- `"Who teaches the last lecture of the day?"` *(Understands context & relative ordering)*
+The system has been tested against various natural language queries on the synthetic schedule dataset.
+
+> 🔗 **Shared Test Chat & Verification Reference**:  
+> [https://chatgpt.com/share/6a853ee7-7340-83ee-a8eb-4837c30fef57](https://chatgpt.com/share/6a853ee7-7340-83ee-a8eb-4837c30fef57)
+
+### Sample Test Questions:
+
+| # | Question | Expected Output / Context |
+| :--- | :--- | :--- |
+| 1 | *"Who teaches Machine Learning?"* | Identifies faculty (`Dr. Amit Shah`) mapped to `Machine Learning` subject. |
+| 2 | *"Who teaches Deep Learning?"* | Returns `Dr. Priya Mehta`. |
+| 3 | *"Who teaches Natural Language Processing?"* | Returns `Dr. Neha Patel`. |
+| 4 | *"What lectures do I have on August 13, 2026?"* | Filters by `lecture_date` = `2026-08-13` and returns scheduled subjects, times, and classrooms. |
+| 5 | *"How many lectures are scheduled on Monday?"* | Filters by `day_of_week` = `Monday` and provides record counts and schedule details. |
+| 6 | *"Where is the Web Technology lab conducted?"* | Identifies classroom / lab location (`Lab-2` / `Technology Block`). |
 
 ---
 
-## 🛡️ Security & Reliability Features
+## 🛡️ Key Features & Design Highlights
 
-- **No Code Execution Injection**: The LLM output is strictly parsed as a JSON query plan and executed against pre-defined DataFrame operations.
-- **Pydantic Validation**: Automatically validates plan structure and handles null/default list conversions gracefully.
-- **Natural Date/Time Handling**: Resolves relative dates like *today*, *tomorrow*, *next Monday*, and *5 PM* dynamically using standard Python `datetime`.
-- **Zero API Key Leakage**: API keys are excluded from all logs and loaded via `.env`.
+- **No Code Injection / Arbitrary Execution**: The LLM outputs strict JSON filters rather than executable Python code, ensuring maximum security and execution safety.
+- **Dynamic Date & Time Resolution**: Uses the system date/time to resolve relative references (*today*, *tomorrow*, *yesterday*).
+- **Stateful Conversation History**: Follow-up questions maintain conversational context through `st.session_state` and LangGraph message states.
+- **Cached Schema Metadata**: Uses Streamlit's `@st.cache_data` for schema inspection, eliminating repeated DataFrame loops.
+- **Dedicated Logging**: Tracks questions, query plans, execution outputs, and answers in `logs/app.log` without leaking sensitive API tokens.

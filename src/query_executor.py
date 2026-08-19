@@ -1,101 +1,90 @@
 import pandas as pd
 import streamlit as st
-from typing import Dict, Any, List, Tuple
+
 from src.state import AgentState
-from src.data_loader import load_csv_data
 from src.logger import logger
 
-def execute_pandas_query(df: pd.DataFrame, plan: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, int]:
-    if df is None or df.empty:
-        return [], "DataFrame is empty.", 0
 
-    filtered_df = df.copy()
-    operation = plan.get("operation", "filter")
-    filters = plan.get("filters", [])
-    columns = plan.get("columns", [])
-    sort_by = plan.get("sort_by")
-    ascending = plan.get("ascending", True)
-    limit = plan.get("limit")
-    last_only = plan.get("last_only", False)
-    target_column = plan.get("target_column")
+def execute_query(df: pd.DataFrame, plan: dict):
+    """Apply the planner filters and return matching records."""
 
-    # Apply Filters
-    for cond in filters:
-        col = cond.get("column")
-        op = cond.get("operator", "eq")
-        val = cond.get("value")
+    result = df.copy()
 
-        if not col or col not in filtered_df.columns or val is None or val == "":
+    # Apply filters
+    for column, value in plan.get("filters", {}).items():
+
+        if column not in result.columns:
             continue
 
-        val_str = str(val).strip()
+        if value is None or value == "":
+            continue
 
-        if op == "eq":
-            if filtered_df[col].dtype == "object":
-                filtered_df = filtered_df[filtered_df[col].astype(str).str.lower() == val_str.lower()]
-            else:
-                filtered_df = filtered_df[filtered_df[col] == val]
-        elif op == "ne":
-            if filtered_df[col].dtype == "object":
-                filtered_df = filtered_df[filtered_df[col].astype(str).str.lower() != val_str.lower()]
-            else:
-                filtered_df = filtered_df[filtered_df[col] != val]
-        elif op == "contains":
-            filtered_df = filtered_df[filtered_df[col].astype(str).str.contains(val_str, case=False, na=False, regex=False)]
-        elif op in ["gt", "gte", "lt", "lte"]:
-            if pd.api.types.is_numeric_dtype(filtered_df[col]):
-                num_val = float(val)
-                if op == "gt": filtered_df = filtered_df[filtered_df[col] > num_val]
-                elif op == "gte": filtered_df = filtered_df[filtered_df[col] >= num_val]
-                elif op == "lt": filtered_df = filtered_df[filtered_df[col] < num_val]
-                elif op == "lte": filtered_df = filtered_df[filtered_df[col] <= num_val]
-            else:
-                col_str = filtered_df[col].astype(str)
-                if op == "gt": filtered_df = filtered_df[col_str > val_str]
-                elif op == "gte": filtered_df = filtered_df[col_str >= val_str]
-                elif op == "lt": filtered_df = filtered_df[col_str < val_str]
-                elif op == "lte": filtered_df = filtered_df[col_str <= val_str]
-        elif op == "in" and isinstance(val, list):
-            val_list = [str(v).lower() for v in val]
-            filtered_df = filtered_df[filtered_df[col].astype(str).str.lower().isin(val_list)]
+        # Case-insensitive matching for text columns
+        if result[column].dtype == "object":
+            result = result[
+                result[column]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                == str(value).strip().lower()
+            ]
+        else:
+            result = result[result[column] == value]
 
-    total_matches = len(filtered_df)
+    # Return only requested columns
+    columns = [
+        column
+        for column in plan.get("columns", [])
+        if column in result.columns
+    ]
 
-    if sort_by and sort_by in filtered_df.columns:
-        filtered_df = filtered_df.sort_values(by=sort_by, ascending=ascending)
+    if columns:
+        result = result[columns]
 
-    if last_only:
-        filtered_df = filtered_df.tail(1)
-    elif limit and limit > 0:
-        filtered_df = filtered_df.head(limit)
+    return result.to_dict(orient="records")
 
-    if operation == "count":
-        return [{"count": total_matches}], f"Total count: {total_matches}", total_matches
 
-    if operation == "unique" and target_column and target_column in df.columns:
-        uniques = filtered_df[target_column].dropna().unique().tolist()
-        summary = f"Unique values in '{target_column}': {', '.join(map(str, uniques))}"
-        records = [{target_column: u} for u in uniques]
-        return records, summary, len(uniques)
+def executor_node(state: AgentState):
 
-    valid_cols = [c for c in columns if c in filtered_df.columns] or list(filtered_df.columns)
-    result_df = filtered_df[valid_cols]
-    records = result_df.to_dict(orient="records")
-    summary = "No matching records found." if total_matches == 0 else result_df.to_string(index=False)
-
-    return records, summary, total_matches
-
-def executor_node(state: AgentState) -> Dict[str, Any]:
     plan = state.get("query_plan")
+    df = st.session_state.get("dataframe")
+
+    if df is None:
+        return {
+            "query_result": [],
+            "query_result_summary": "CSV data is not loaded.",
+            "error": "DataFrame not loaded."
+        }
+
     if not plan:
-        return {"query_result": [], "query_result_summary": "No query plan.", "error": "Missing plan."}
+        return {
+            "query_result": [],
+            "query_result_summary": "No query plan.",
+            "error": "Missing query plan."
+        }
+
     try:
-        df = st.session_state.get("dataframe")
-        if df is None:
-            return {"query_result": [], "query_result_summary": "No CSV data loaded.", "error": "DataFrame not loaded."}
-            
-        records, summary, total_matches = execute_pandas_query(df, plan)
-        logger.info(f"pandas_result: {summary}")
-        return {"query_result": records, "query_result_summary": summary, "error": None}
+        records = execute_query(df, plan)
+
+        summary = (
+            "No matching records found."
+            if not records
+            else str(records)
+        )
+
+        logger.info(f"Query result: {records}")
+
+        return {
+            "query_result": records,
+            "query_result_summary": summary,
+            "error": None
+        }
+
     except Exception as e:
-        return {"query_result": [], "query_result_summary": "Execution error.", "error": str(e)}
+        logger.error(f"Query execution error: {e}")
+
+        return {
+            "query_result": [],
+            "query_result_summary": "Query execution failed.",
+            "error": str(e)
+        }
